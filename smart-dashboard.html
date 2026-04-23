@@ -702,6 +702,63 @@
     height: 1px;
     background: var(--border);
   }
+
+  /* ── WFH INSIGHT OVERLAY ── */
+  .chart-card { position: relative; }
+  .insight-overlay {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    background: linear-gradient(to top, rgba(15,14,13,0.97) 60%, rgba(15,14,13,0.0));
+    padding: 2rem 1.25rem 1.1rem;
+    transform: translateY(100%);
+    transition: transform 0.28s ease;
+    border-radius: 0 0 var(--radius) var(--radius);
+    z-index: 10;
+  }
+  .chart-card:hover .insight-overlay { transform: translateY(0); }
+  .overlay-title {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent2);
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .overlay-title::before {
+    content: '';
+    display: inline-block;
+    width: 5px; height: 5px;
+    background: var(--accent2);
+    border-radius: 50%;
+  }
+  .overlay-item {
+    font-size: 0.78rem;
+    color: rgba(255,255,255,0.87);
+    padding: 0.18rem 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    line-height: 1.45;
+  }
+  .overlay-item::before { content: '→'; color: var(--accent2); flex-shrink: 0; }
+
+  /* ── WFH WARNING BADGE ── */
+  .wfh-warning-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: #fff8ec;
+    border: 1px solid #f5d08a;
+    border-radius: 100px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.67rem;
+    font-weight: 500;
+    color: #7a5000;
+    margin-top: 0.4rem;
+  }
 </style>
 </head>
 <body>
@@ -1150,6 +1207,9 @@ async function buildDashboard(fileName, ext) {
 }
 
 function buildStatCards() {
+  const wfhCols = detectWFHColumns();
+  if (isWFHDashboard(wfhCols)) { buildWFHStatCards(wfhCols); return; }
+
   const grid = document.getElementById('stats-grid');
   grid.innerHTML = '';
 
@@ -1190,6 +1250,9 @@ function addStatCard(grid, label, value, sub, color) {
 }
 
 function buildCharts() {
+  const wfhCols = detectWFHColumns();
+  if (isWFHDashboard(wfhCols)) { buildWFHCharts(wfhCols); return; }
+
   const grid = document.getElementById('charts-grid');
   grid.innerHTML = '';
   let chartIdx = 0;
@@ -1421,6 +1484,516 @@ function makeHistogram(vals, bins) {
     return lo >= 1000 ? (lo/1000).toFixed(0)+'K' : lo.toFixed(lo < 1 ? 2 : 0);
   });
   return { labels, data: counts };
+}
+
+// ──────────────────────────────────────────────
+// WFH DETECTION & COLUMN MAPPING
+// ──────────────────────────────────────────────
+function detectWFHColumns() {
+  const key = c => c.toLowerCase().replace(/[\s_\-\.]/g, '');
+  const match = patterns => columns.find(c => patterns.some(p => key(c).includes(p)));
+  return {
+    employee:   match(['employeename','empname','staffname','employee']),
+    empId:      match(['employeeid','empid','staffid','employeeno','empno']),
+    department: match(['department','dept']),
+    cadre:      match(['cadre','grade','designation','jobtitle','role','band','level']),
+    supervisor: match(['supervisor','manager','reportingto','reportsto','linemanager']),
+    wfhStatus:  match(['wfhstatus','workmode','wfhtype','workarrangement','arrangementtype','worktype']),
+    fullDayWFH: match(['fulldaywfh','wfhfullday','fullday','wfhdays','wfhdaycount']),
+    partialWFH: match(['partialwfh','wfhpartial','halfday','partialday','partial']),
+    officeDays: match(['officedays','daysinoffice','officedaysperweek','officedaycount']),
+    netHours:   match(['nethours','nethrs','nethoursoffice','hoursinoffice','officehours','nethour']),
+    totalDays:  match(['totaldays','workingdays','totalworkingdays','totalworkdays']),
+  };
+}
+
+function isWFHDashboard(wfhCols) {
+  return !!(wfhCols.department &&
+    (wfhCols.wfhStatus || wfhCols.netHours || wfhCols.officeDays || wfhCols.fullDayWFH));
+}
+
+function normalizeWFHStatus(val) {
+  const v = String(val || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (v.includes('permanent')) return 'Permanent WFH';
+  if (v.includes('temporary') || v.includes('temp')) return 'Temporary WFH';
+  if (v.includes('in office') || v.includes('inoffice') || v === 'office') return 'In Office';
+  if (v.includes('wfh') || v.includes('work from home') || v.includes('remote') || v.includes('home')) return 'Permanent WFH';
+  return 'In Office';
+}
+
+// ──────────────────────────────────────────────
+// EMPLOYEE STATS AGGREGATION
+// ──────────────────────────────────────────────
+const BUCKET_LABELS  = ['0%', '1–30%', '30–50%', '50–70%', '70–90%', '90%+'];
+const BUCKET_COLORS  = ['#c84b1f','#e86820','#e8a020','#8c7c1e','#3d6e2a','#2a6e4e'];
+const BUCKET_COLORS_ALPHA = BUCKET_COLORS.map(c => c + 'bb');
+
+function presenceBucket(pct) {
+  if (pct === 0)    return '0%';
+  if (pct <= 30)    return '1–30%';
+  if (pct <= 50)    return '30–50%';
+  if (pct <= 70)    return '50–70%';
+  if (pct <= 90)    return '70–90%';
+  return '90%+';
+}
+
+function computeEmployeeStats(wfhCols) {
+  const empMap = {};
+
+  rawData.forEach((row, idx) => {
+    const empKey = wfhCols.empId      ? String(row[wfhCols.empId]      || idx)
+                 : wfhCols.employee   ? String(row[wfhCols.employee]   || idx)
+                 : String(idx);
+
+    if (!empMap[empKey]) {
+      empMap[empKey] = {
+        id:          empKey,
+        name:        wfhCols.employee   ? String(row[wfhCols.employee]   || empKey) : empKey,
+        department:  wfhCols.department ? String(row[wfhCols.department] || 'Unknown') : 'Unknown',
+        cadre:       wfhCols.cadre      ? String(row[wfhCols.cadre]      || '') : '',
+        supervisor:  wfhCols.supervisor ? String(row[wfhCols.supervisor] || '') : '',
+        rawStatus:   wfhCols.wfhStatus  ? String(row[wfhCols.wfhStatus] || '') : '',
+        netHoursSum: 0,
+        totalDays:   0,
+        officeDays:  0,
+        fullDayWFH:  0,
+        partialWFH:  0,
+        rowCount:    0,
+      };
+    }
+
+    const emp = empMap[empKey];
+
+    if (wfhCols.netHours) {
+      const h = parseFloat(row[wfhCols.netHours]);
+      if (!isNaN(h)) emp.netHoursSum += h;
+    }
+    if (wfhCols.totalDays) {
+      const d = parseFloat(row[wfhCols.totalDays]);
+      if (!isNaN(d) && d > emp.totalDays) emp.totalDays = d;
+    }
+    if (wfhCols.officeDays) {
+      const d = parseFloat(row[wfhCols.officeDays]);
+      if (!isNaN(d)) emp.officeDays += d;
+    }
+    if (wfhCols.fullDayWFH) {
+      const d = parseFloat(row[wfhCols.fullDayWFH]);
+      if (!isNaN(d)) emp.fullDayWFH += d;
+    }
+    if (wfhCols.partialWFH) {
+      const d = parseFloat(row[wfhCols.partialWFH]);
+      if (!isNaN(d)) emp.partialWFH += d;
+    }
+
+    emp.rowCount++;
+    if (wfhCols.wfhStatus && row[wfhCols.wfhStatus]) {
+      emp.rawStatus = String(row[wfhCols.wfhStatus]);
+    }
+  });
+
+  const employees = Object.values(empMap);
+
+  employees.forEach(emp => {
+    emp.status = normalizeWFHStatus(emp.rawStatus);
+
+    // Office presence % = sum(Net Hours) / (Total Working Days × 9) × 100
+    if (wfhCols.netHours && emp.totalDays > 0) {
+      emp.officePresencePct = Math.min(100, (emp.netHoursSum / (emp.totalDays * 9)) * 100);
+    } else if (wfhCols.netHours && emp.rowCount > 0) {
+      emp.officePresencePct = Math.min(100, (emp.netHoursSum / (emp.rowCount * 9)) * 100);
+    } else if (emp.officeDays > 0 && emp.totalDays > 0) {
+      emp.officePresencePct = Math.min(100, (emp.officeDays / emp.totalDays) * 100);
+    } else {
+      emp.officePresencePct = emp.status === 'In Office'       ? 100
+                            : emp.status === 'Temporary WFH'  ? 50
+                            : 0;
+      emp.presenceIsProxy = true;
+    }
+
+    emp.bucket = presenceBucket(emp.officePresencePct);
+  });
+
+  return employees;
+}
+
+// ──────────────────────────────────────────────
+// WFH STAT CARDS
+// ──────────────────────────────────────────────
+function buildWFHStatCards(wfhCols) {
+  const grid = document.getElementById('stats-grid');
+  grid.innerHTML = '';
+
+  const employees = computeEmployeeStats(wfhCols);
+  const total = employees.length;
+
+  let fullDayCount = 0;
+  if (wfhCols.fullDayWFH) {
+    employees.forEach(e => { fullDayCount += e.fullDayWFH || 0; });
+    fullDayCount = Math.round(fullDayCount);
+  } else {
+    fullDayCount = employees.filter(e => e.status !== 'In Office').length;
+  }
+
+  let partialCount = 0;
+  if (wfhCols.partialWFH) {
+    employees.forEach(e => { partialCount += e.partialWFH || 0; });
+    partialCount = Math.round(partialCount);
+  }
+
+  const permCount = employees.filter(e => e.status === 'Permanent WFH').length;
+  const tempCount = employees.filter(e => e.status === 'Temporary WFH').length;
+
+  const pct = n => total > 0 ? `${((n / total) * 100).toFixed(1)}% of workforce` : '–';
+
+  addStatCard(grid, 'Total Headcount',  total.toLocaleString(),            'unique employees',              PALETTE[1]);
+  addStatCard(grid, 'Full Day WFH',     fullDayCount.toLocaleString(),     wfhCols.fullDayWFH ? 'days taken' : 'employees on WFH', PALETTE[0]);
+  addStatCard(grid, 'Partial Day WFH',  partialCount.toLocaleString(),     wfhCols.partialWFH ? 'days taken' : 'col not in data',  PALETTE[3]);
+  addStatCard(grid, 'Permanent WFH',    permCount.toLocaleString(),        pct(permCount),                  PALETTE[0]);
+  addStatCard(grid, 'Temporary WFH',    tempCount.toLocaleString(),        pct(tempCount),                  PALETTE[3]);
+}
+
+// ──────────────────────────────────────────────
+// WFH CHART ORCHESTRATOR
+// ──────────────────────────────────────────────
+function buildWFHCharts(wfhCols) {
+  const grid = document.getElementById('charts-grid');
+  grid.innerHTML = '';
+  let idx = 0;
+
+  const employees = computeEmployeeStats(wfhCols);
+
+  buildChartA(grid, employees, wfhCols, idx++);
+  buildChartB(grid, employees, wfhCols, idx++);
+  buildChartC(grid, employees, wfhCols, idx++);
+  buildChartD(grid, employees, wfhCols, idx++);
+}
+
+// ── Chart A: Department-wise WFH Taken ──────
+function buildChartA(grid, employees, wfhCols, idx) {
+  const deptMap = {};
+  employees.forEach(e => {
+    if (!deptMap[e.department]) deptMap[e.department] = { total: 0, wfh: 0, people: [] };
+    deptMap[e.department].total++;
+    deptMap[e.department].people.push(e);
+    if (e.status !== 'In Office') deptMap[e.department].wfh++;
+  });
+
+  const sorted = Object.entries(deptMap).sort((a, b) => b[1].wfh - a[1].wfh);
+  const labels      = sorted.map(([d]) => d);
+  const wfhCounts   = sorted.map(([, v]) => v.wfh);
+  const totals      = sorted.map(([, v]) => v.total);
+  const pcts        = sorted.map(([, v]) => v.total > 0 ? ((v.wfh / v.total) * 100).toFixed(1) : '0.0');
+
+  const totalWFH  = employees.filter(e => e.status !== 'In Office').length;
+  const totalPct  = employees.length > 0 ? ((totalWFH / employees.length) * 100).toFixed(1) : '0.0';
+  const zeroDepts = sorted.filter(([, v]) => v.wfh === 0).map(([d]) => d);
+
+  const topInsights = sorted.slice(0, 3).map(([dept, v]) => {
+    const names = v.people.filter(e => e.status !== 'In Office').slice(0, 2).map(e => e.name).join(', ');
+    return `<strong>${dept}</strong>: ${v.wfh} WFH / ${v.total} total (${v.total > 0 ? ((v.wfh/v.total)*100).toFixed(0) : 0}%)${names ? ` — ${names}` : ''}`;
+  });
+
+  const card = addChartCard(grid, 'Department-wise WFH Taken',
+    'Headcount of WFH employees (Permanent + Temporary) per department', 'span-12', idx);
+  card.querySelector('.chart-wrap').style.height = '300px';
+
+  addInsightOverlay(card, [
+    `${totalWFH} of ${employees.length} employees (${totalPct}%) are on WFH across all departments`,
+    topInsights.length ? topInsights.join('<br>&nbsp;&nbsp;&nbsp;') : 'No WFH recorded',
+    zeroDepts.length > 0
+      ? `Full in-office compliance: ${zeroDepts.slice(0, 4).join(', ')}`
+      : 'Every department has at least some WFH',
+  ]);
+
+  const ctx = card.querySelector('canvas').getContext('2d');
+  const c = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'WFH Employees',
+        data: wfhCounts,
+        backgroundColor: PALETTE[0] + 'bb',
+        borderColor: PALETTE[0],
+        borderWidth: 1.5,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const i = ctx.dataIndex;
+              return ` WFH: ${wfhCounts[i]}  |  Total: ${totals[i]}  |  ${pcts[i]}% of dept`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(0,0,0,0.04)' },
+          ticks: { precision: 0 },
+          title: { display: true, text: 'No. of Employees on WFH', font: { size: 11 } }
+        },
+        y: { grid: { display: false }, ticks: { font: { size: 11 } } }
+      }
+    }
+  });
+  chartInstances.push(c);
+}
+
+// ── Chart B: Office Presence Distribution ───
+function buildChartB(grid, employees, wfhCols, idx) {
+  const bucketPeople = {};
+  BUCKET_LABELS.forEach(b => bucketPeople[b] = []);
+  employees.forEach(e => { if (bucketPeople[e.bucket]) bucketPeople[e.bucket].push(e); });
+
+  const counts      = BUCKET_LABELS.map(b => bucketPeople[b].length);
+  const hasProxy    = employees.some(e => e.presenceIsProxy);
+  const maxBucket   = BUCKET_LABELS[counts.indexOf(Math.max(...counts))];
+  const top90       = (bucketPeople['90%+'] || []).sort((a, b) => b.officePresencePct - a.officePresencePct).slice(0, 3);
+  const top0        = bucketPeople['0%'] || [];
+
+  const card = addChartCard(grid, 'Office Presence Distribution',
+    'Employees by % of time in office  (Net Hours ÷ Working Days ÷ 9)', 'span-6', idx);
+
+  addInsightOverlay(card, [
+    `Largest group: <strong>${maxBucket}</strong> — ${Math.max(...counts)} employees`,
+    top90.length > 0
+      ? `Top 90%+ attenders: ${top90.map(e => `${e.name} (${e.officePresencePct.toFixed(0)}%)`).join(', ')}`
+      : 'No employees with 90%+ office presence yet',
+    top0.length > 0
+      ? `Never in office: ${top0.slice(0, 3).map(e => e.name).join(', ')}${top0.length > 3 ? ` +${top0.length - 3} more` : ''}`
+      : 'All employees have some office presence',
+  ]);
+
+  if (hasProxy) {
+    const badge = document.createElement('div');
+    badge.className = 'wfh-warning-badge';
+    badge.textContent = '⚠ Net hours not found — using WFH status as proxy';
+    card.querySelector('.card-header > div').appendChild(badge);
+  }
+
+  const ctx = card.querySelector('canvas').getContext('2d');
+  const c = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: BUCKET_LABELS,
+      datasets: [{
+        label: 'Employees',
+        data: counts,
+        backgroundColor: BUCKET_COLORS_ALPHA,
+        borderColor: BUCKET_COLORS,
+        borderWidth: 1.5,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const count = counts[ctx.dataIndex];
+              const pct = employees.length > 0 ? ((count / employees.length) * 100).toFixed(1) : '0.0';
+              return ` ${count} employees (${pct}% of total)`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          title: { display: true, text: 'Office Presence Range', font: { size: 11 } }
+        },
+        y: {
+          grid: { color: 'rgba(0,0,0,0.04)' },
+          ticks: { precision: 0 },
+          title: { display: true, text: 'No. of Employees', font: { size: 11 } }
+        }
+      }
+    }
+  });
+  chartInstances.push(c);
+}
+
+// ── Chart C: WFH Status Breakdown (donut) ───
+function buildChartC(grid, employees, wfhCols, idx) {
+  const statuses   = ['Permanent WFH', 'Temporary WFH', 'In Office'];
+  const colors     = ['#c84b1f', '#e8a020', '#2a6e4e'];
+  const colorsAlpha= ['#c84b1fcc', '#e8a020cc', '#2a6e4ecc'];
+  const counts     = statuses.map(s => employees.filter(e => e.status === s).length);
+  const total      = employees.length;
+
+  const top3WFH = [...employees]
+    .filter(e => e.status !== 'In Office')
+    .sort((a, b) => (b.fullDayWFH || 0) - (a.fullDayWFH || 0))
+    .slice(0, 3);
+  const top3Office = [...employees]
+    .sort((a, b) => b.officePresencePct - a.officePresencePct)
+    .slice(0, 3);
+  const ratio = counts[1] > 0 ? (counts[0] / counts[1]).toFixed(1) + ':1' : 'N/A (no temporary WFH)';
+
+  const card = addChartCard(grid, 'WFH Status Breakdown',
+    'Permanent WFH vs Temporary WFH vs In Office', 'span-6', idx);
+
+  addInsightOverlay(card, [
+    top3WFH.length > 0
+      ? `Top WFH employees: ${top3WFH.map(e => `${e.name} (${e.status === 'Permanent WFH' ? 'Perm' : 'Temp'})`).join(', ')}`
+      : 'No WFH employees in dataset',
+    top3Office.length > 0
+      ? `Highest office presence: ${top3Office.map(e => `${e.name} (${e.officePresencePct.toFixed(0)}%)`).join(', ')}`
+      : 'No office presence data',
+    `Permanent : Temporary WFH ratio = ${ratio}`,
+  ]);
+
+  const ctx = card.querySelector('canvas').getContext('2d');
+  const c = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: statuses,
+      datasets: [{
+        data: counts,
+        backgroundColor: colorsAlpha,
+        borderColor: colors,
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      cutout: '62%',
+      plugins: {
+        legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const count = counts[ctx.dataIndex];
+              const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0.0';
+              return ` ${count} employees (${pct}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+  chartInstances.push(c);
+}
+
+// ── Chart D: Permanent vs Temporary by Dept ─
+function buildChartD(grid, employees, wfhCols, idx) {
+  const deptMap = {};
+  employees.forEach(e => {
+    if (!deptMap[e.department]) {
+      deptMap[e.department] = { perm: 0, temp: 0, total: 0, supervisors: new Set(), cadres: {}, people: [] };
+    }
+    const d = deptMap[e.department];
+    d.total++;
+    d.people.push(e);
+    if (e.status === 'Permanent WFH') d.perm++;
+    if (e.status === 'Temporary WFH') d.temp++;
+    if (e.supervisor) d.supervisors.add(e.supervisor);
+    if (e.cadre) d.cadres[e.cadre] = (d.cadres[e.cadre] || 0) + 1;
+  });
+
+  const sorted     = Object.entries(deptMap).sort((a, b) => (b[1].perm + b[1].temp) - (a[1].perm + a[1].temp));
+  const labels     = sorted.map(([d]) => d);
+  const permCounts = sorted.map(([, v]) => v.perm);
+  const tempCounts = sorted.map(([, v]) => v.temp);
+
+  const highWFH = sorted.filter(([, v]) => v.total > 0 && (v.perm + v.temp) / v.total > 0.5);
+  const topPerm = [...sorted].sort((a, b) => b[1].perm - a[1].perm)[0];
+  const topTemp = [...sorted].sort((a, b) => b[1].temp - a[1].temp)[0];
+
+  const card = addChartCard(grid, 'Permanent vs Temporary WFH by Department',
+    'Side-by-side comparison — cadre & supervisor detail on tooltip', 'span-12', idx);
+  card.querySelector('.chart-wrap').style.height = '280px';
+
+  addInsightOverlay(card, [
+    highWFH.length > 0
+      ? `Action needed — WFH > 50% of dept: ${highWFH.slice(0, 3).map(([d, v]) => `${d} (${(((v.perm+v.temp)/v.total)*100).toFixed(0)}%)`).join(', ')}`
+      : 'No department exceeds 50% WFH — workforce is predominantly in-office',
+    topPerm && topPerm[1].perm > 0
+      ? `Highest permanent WFH: <strong>${topPerm[0]}</strong> (${topPerm[1].perm} employees)`
+      : 'No permanent WFH recorded',
+    topTemp && topTemp[1].temp > 0
+      ? `Highest temporary WFH: <strong>${topTemp[0]}</strong> (${topTemp[1].temp} employees)`
+      : 'No temporary WFH recorded',
+  ]);
+
+  const ctx = card.querySelector('canvas').getContext('2d');
+  const c = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Permanent WFH',
+          data: permCounts,
+          backgroundColor: '#c84b1fbb',
+          borderColor: '#c84b1f',
+          borderWidth: 1.5,
+          borderRadius: 4,
+        },
+        {
+          label: 'Temporary WFH',
+          data: tempCounts,
+          backgroundColor: '#e8a020bb',
+          borderColor: '#e8a020',
+          borderWidth: 1.5,
+          borderRadius: 4,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: {
+          callbacks: {
+            afterBody: items => {
+              const i = items[0]?.dataIndex;
+              if (i === undefined) return [];
+              const [, v] = sorted[i];
+              const sups     = [...v.supervisors].slice(0, 2).join(', ');
+              const cadreStr = Object.entries(v.cadres).slice(0, 3).map(([k, n]) => `${k}: ${n}`).join(', ');
+              const wfhPct   = v.total > 0 ? (((v.perm + v.temp) / v.total) * 100).toFixed(0) : 0;
+              const lines    = [];
+              if (sups)     lines.push(`Supervisor: ${sups}`);
+              if (cadreStr) lines.push(`Cadre: ${cadreStr}`);
+              lines.push(`Total dept: ${v.total}  |  WFH: ${v.perm + v.temp} (${wfhPct}%)`);
+              return lines;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: {
+          grid: { color: 'rgba(0,0,0,0.04)' },
+          ticks: { precision: 0 },
+          title: { display: true, text: 'No. of Employees', font: { size: 11 } }
+        }
+      }
+    }
+  });
+  chartInstances.push(c);
+}
+
+function addInsightOverlay(card, lines) {
+  const overlay = document.createElement('div');
+  overlay.className = 'insight-overlay';
+  overlay.innerHTML = `<div class="overlay-title">Leadership Insights</div>` +
+    lines.map(l => `<div class="overlay-item">${l}</div>`).join('');
+  card.appendChild(overlay);
 }
 
 function addChartCard(grid, title, sub, spanClass, idx) {
